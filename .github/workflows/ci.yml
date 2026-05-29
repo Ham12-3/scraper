@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ── TypeScript modules (module1, module3) ──────────────────────────────────
+  typescript:
+    name: TypeScript (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - module1-browser-controller
+          - module3-kafka-worker
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ${{ matrix.module }}/package.json
+
+      # module3 depends on module1 via a file: dependency (../module1-browser-controller),
+      # which is present in the same checkout, so a plain npm install resolves it.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+  # ── Python modules (module2, module4) ──────────────────────────────────────
+  python:
+    name: Python (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - module2-html-parser
+          - module4-dedup-pipeline
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ${{ matrix.module }}/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: Run tests
+        run: pytest
+
+  # ── docker-compose config validation ───────────────────────────────────────
+  compose-validate:
+    name: Validate docker-compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        env:
+          # Dummy value so the ${ANTHROPIC_API_KEY} substitution resolves.
+          ANTHROPIC_API_KEY: dummy-key-for-ci
+        run: docker compose config
