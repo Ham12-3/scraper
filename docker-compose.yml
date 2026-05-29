@@ -1,0 +1,198 @@
+x-kafka-image: &kafka-image apache/kafka:3.7.0
+
+services:
+  # ── Kafka (KRaft — no ZooKeeper) ──────────────────────────────────────────
+  kafka:
+    image: *kafka-image
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  kafka-init:
+    image: *kafka-image
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 --if-not-exists --topic scrape-requests
+        /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 --if-not-exists --topic parse-results
+        /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --if-not-exists --topic scrape-dlq
+        echo "Topics ready."
+    restart: on-failure
+
+  # ── Module 2: HTML Parser HTTP service ────────────────────────────────────
+  parser:
+    build:
+      context: module2-html-parser
+      dockerfile: Dockerfile
+    environment:
+      PARSER_STRATEGY_ORDER: heuristic,llm
+      PARSER_SELECTOR_SETS: "[]"
+      PARSER_MIN_HTML_LENGTH: "200"
+      LLM_MODEL: claude-haiku-4-5-20251001
+      LLM_MAX_TOKENS: "1024"
+      LLM_TEMPERATURE: "0.0"
+      LLM_TIMEOUT_SECONDS: "30"
+      LLM_MAX_HTML_CHARS: "8000"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      PARSER_PORT: "8080"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Module 1 + 3: Scraper Worker ──────────────────────────────────────────
+  scraper-worker:
+    build:
+      context: .
+      dockerfile: module3-kafka-worker/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      parser:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: scraper-worker
+      KAFKA_GROUP_ID: scraper-workers
+      KAFKA_SSL: "false"
+      KAFKA_CONNECTION_TIMEOUT_MS: "10000"
+      KAFKA_REQUEST_TIMEOUT_MS: "30000"
+      KAFKA_TOPIC_INPUT: scrape-requests
+      KAFKA_TOPIC_OUTPUT: parse-results
+      KAFKA_TOPIC_DEAD_LETTER: scrape-dlq
+      KAFKA_FROM_BEGINNING: "true"
+      RETRY_MAX_RETRIES: "3"
+      RETRY_INITIAL_DELAY_MS: "1000"
+      RETRY_BACKOFF_FACTOR: "2.0"
+      RETRY_MAX_DELAY_MS: "30000"
+      METRICS_PORT: "9090"
+      METRICS_PATH: /metrics
+      WORKER_CONCURRENCY: "2"
+      WORKER_SHUTDOWN_TIMEOUT_MS: "30000"
+      PARSER_SERVICE_URL: http://parser:8080
+      SCRAPER_MOCK_MODE: "true"
+      # Module 1 browser config (used when SCRAPER_MOCK_MODE=false)
+      CLUSTER_MAX_WORKERS: "2"
+      CLUSTER_LAUNCH_TIMEOUT_MS: "30000"
+      CLUSTER_NAVIGATION_TIMEOUT_MS: "30000"
+      CLUSTER_HEADLESS: "true"
+      STEALTH_PROFILE: standard
+      STEALTH_USER_AGENTS: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+      STEALTH_WEBGL_VENDOR: Intel Inc.
+      STEALTH_WEBGL_RENDERER: Intel Iris OpenGL Engine
+      STEALTH_SPOOF_CANVAS: "true"
+      RESOURCE_BLOCKED_TYPES: image,media,font,stylesheet
+      MIMICRY_MOUSE_WAYPOINT_MIN: "5"
+      MIMICRY_MOUSE_WAYPOINT_MAX: "15"
+      MIMICRY_MOUSE_STEP_DELAY_MIN: "10"
+      MIMICRY_MOUSE_STEP_DELAY_MAX: "40"
+      MIMICRY_SCROLL_STEP_MIN: "50"
+      MIMICRY_SCROLL_STEP_MAX: "150"
+      MIMICRY_SCROLL_DELAY_MIN: "30"
+      MIMICRY_SCROLL_DELAY_MAX: "100"
+      MIMICRY_KEYSTROKE_DELAY_MIN: "50"
+      MIMICRY_KEYSTROKE_DELAY_MAX: "150"
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  # ── PostgreSQL — deduplicated job-posting store ───────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scraper
+      POSTGRES_PASSWORD: scraper
+      POSTGRES_DB: scraper
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scraper -d scraper"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── Module 4: Dedup Worker ────────────────────────────────────────────────
+  dedup-worker:
+    build:
+      context: module4-dedup-pipeline
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      DEDUP_BLOCKING_STRATEGIES: company_title,title_function
+      DEDUP_BLOCKING_MAX_PAIRS: "5000"
+      DEDUP_COMPARISON_FIELDS: >-
+        [{"field":"job_title_tokens","metric":"jaro_winkler","weight":0.5,"field_match_threshold":0.85},
+         {"field":"company_name_normalized","metric":"jaro_winkler","weight":0.5,"field_match_threshold":0.9}]
+      DEDUP_CLASSIFIER_TYPE: threshold
+      DEDUP_MATCH_THRESHOLD: "0.75"
+      DEDUP_UNMATCH_THRESHOLD: "0.3"
+      DEDUP_BATCH_SIZE: "100"
+      DEDUP_KAFKA_BROKERS: kafka:9092
+      DEDUP_KAFKA_GROUP_ID: dedup-workers
+      DEDUP_KAFKA_INPUT_TOPIC: parse-results
+      DEDUP_FLUSH_INTERVAL_S: "15"
+      DEDUP_BATCH_FLUSH_SIZE: "4"
+      DEDUP_POSTGRES_DSN: postgresql://scraper:scraper@postgres:5432/scraper
+    restart: unless-stopped
+
+  # ── Sample Producer ───────────────────────────────────────────────────────
+  sample-producer:
+    image: python:3.11-slim
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC_INPUT: scrape-requests
+    command: >
+      bash -c "pip install kafka-python -q &&
+               python /scripts/sample_producer.py"
+    volumes:
+      - ./scripts:/scripts:ro
+    restart: on-failure
+
+volumes:
+  kafka-data:
+  postgres-data:
