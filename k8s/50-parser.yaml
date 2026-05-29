@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Parser (Module 2) — scraper-parser image. Gunicorn Flask on :8080.
+# Endpoints: /parse, /health. ANTHROPIC_API_KEY from the Secret.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: parser
+  namespace: scraper
+  labels:
+    app: parser
+    app.kubernetes.io/part-of: scraper-system
+spec:
+  type: ClusterIP
+  selector:
+    app: parser
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parser
+  namespace: scraper
+  labels:
+    app: parser
+    app.kubernetes.io/part-of: scraper-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parser
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: parser
+        app.kubernetes.io/part-of: scraper-system
+    spec:
+      containers:
+        - name: parser
+          image: scraper-parser
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: parser-config
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: scraper-secrets
+                  key: ANTHROPIC_API_KEY
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "768Mi"

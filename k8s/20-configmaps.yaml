@@ -1,0 +1,121 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ConfigMaps — all non-secret environment configuration, one map per workload.
+# Mirrors the `environment:` blocks in docker-compose.yml.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Kafka broker config (KRaft mode) ─────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  namespace: scraper
+  labels:
+    app.kubernetes.io/part-of: scraper-system
+data:
+  KAFKA_NODE_ID: "1"
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-0.kafka-headless.scraper.svc.cluster.local:9093"
+  KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+  KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka.scraper.svc.cluster.local:9092"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+  KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+---
+# ── Parser (Module 2) config ─────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: parser-config
+  namespace: scraper
+  labels:
+    app.kubernetes.io/part-of: scraper-system
+data:
+  PARSER_STRATEGY_ORDER: "heuristic,llm"
+  PARSER_SELECTOR_SETS: "[]"
+  PARSER_MIN_HTML_LENGTH: "200"
+  LLM_MODEL: "claude-haiku-4-5-20251001"
+  LLM_MAX_TOKENS: "1024"
+  LLM_TEMPERATURE: "0.0"
+  LLM_TIMEOUT_SECONDS: "30"
+  LLM_MAX_HTML_CHARS: "8000"
+  PARSER_PORT: "8080"
+---
+# ── Scraper Worker (Modules 1 + 3) config ────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scraper-worker-config
+  namespace: scraper
+  labels:
+    app.kubernetes.io/part-of: scraper-system
+data:
+  KAFKA_BROKERS: "kafka:9092"
+  KAFKA_CLIENT_ID: "scraper-worker"
+  KAFKA_GROUP_ID: "scraper-workers"
+  KAFKA_SSL: "false"
+  KAFKA_CONNECTION_TIMEOUT_MS: "10000"
+  KAFKA_REQUEST_TIMEOUT_MS: "30000"
+  KAFKA_TOPIC_INPUT: "scrape-requests"
+  KAFKA_TOPIC_OUTPUT: "parse-results"
+  KAFKA_TOPIC_DEAD_LETTER: "scrape-dlq"
+  KAFKA_FROM_BEGINNING: "true"
+  RETRY_MAX_RETRIES: "3"
+  RETRY_INITIAL_DELAY_MS: "1000"
+  RETRY_BACKOFF_FACTOR: "2.0"
+  RETRY_MAX_DELAY_MS: "30000"
+  METRICS_PORT: "9090"
+  METRICS_PATH: "/metrics"
+  WORKER_CONCURRENCY: "2"
+  WORKER_SHUTDOWN_TIMEOUT_MS: "30000"
+  PARSER_SERVICE_URL: "http://parser:8080"
+  SCRAPER_MOCK_MODE: "true"
+  # Module 1 browser config (used when SCRAPER_MOCK_MODE=false)
+  CLUSTER_MAX_WORKERS: "2"
+  CLUSTER_LAUNCH_TIMEOUT_MS: "30000"
+  CLUSTER_NAVIGATION_TIMEOUT_MS: "30000"
+  CLUSTER_HEADLESS: "true"
+  STEALTH_PROFILE: "standard"
+  STEALTH_USER_AGENTS: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+  STEALTH_WEBGL_VENDOR: "Intel Inc."
+  STEALTH_WEBGL_RENDERER: "Intel Iris OpenGL Engine"
+  STEALTH_SPOOF_CANVAS: "true"
+  RESOURCE_BLOCKED_TYPES: "image,media,font,stylesheet"
+  MIMICRY_MOUSE_WAYPOINT_MIN: "5"
+  MIMICRY_MOUSE_WAYPOINT_MAX: "15"
+  MIMICRY_MOUSE_STEP_DELAY_MIN: "10"
+  MIMICRY_MOUSE_STEP_DELAY_MAX: "40"
+  MIMICRY_SCROLL_STEP_MIN: "50"
+  MIMICRY_SCROLL_STEP_MAX: "150"
+  MIMICRY_SCROLL_DELAY_MIN: "30"
+  MIMICRY_SCROLL_DELAY_MAX: "100"
+  MIMICRY_KEYSTROKE_DELAY_MIN: "50"
+  MIMICRY_KEYSTROKE_DELAY_MAX: "150"
+---
+# ── Dedup Worker (Module 4) config ───────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dedup-worker-config
+  namespace: scraper
+  labels:
+    app.kubernetes.io/part-of: scraper-system
+data:
+  DEDUP_BLOCKING_STRATEGIES: "company_title,title_function"
+  DEDUP_BLOCKING_MAX_PAIRS: "5000"
+  DEDUP_COMPARISON_FIELDS: |-
+    [{"field":"job_title_tokens","metric":"jaro_winkler","weight":0.5,"field_match_threshold":0.85},
+     {"field":"company_name_normalized","metric":"jaro_winkler","weight":0.5,"field_match_threshold":0.9}]
+  DEDUP_CLASSIFIER_TYPE: "threshold"
+  DEDUP_MATCH_THRESHOLD: "0.75"
+  DEDUP_UNMATCH_THRESHOLD: "0.3"
+  DEDUP_BATCH_SIZE: "100"
+  DEDUP_KAFKA_BROKERS: "kafka:9092"
+  DEDUP_KAFKA_GROUP_ID: "dedup-workers"
+  DEDUP_KAFKA_INPUT_TOPIC: "parse-results"
+  DEDUP_FLUSH_INTERVAL_S: "15"
+  DEDUP_BATCH_FLUSH_SIZE: "4"

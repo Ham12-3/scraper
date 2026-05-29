@@ -1,0 +1,90 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Scraper Worker (Modules 1 + 3) — scraper-scraper-worker image.
+# Runs `node dist/main.js`, exposes Prometheus metrics on :9090 at /metrics.
+# Consumes scrape-requests, calls the parser, produces parse-results.
+# Scaled by the HPA in 80-hpa.yaml (2–6 replicas).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: scraper-worker
+  namespace: scraper
+  labels:
+    app: scraper-worker
+    app.kubernetes.io/part-of: scraper-system
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app: scraper-worker
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scraper-worker
+  namespace: scraper
+  labels:
+    app: scraper-worker
+    app.kubernetes.io/part-of: scraper-system
+spec:
+  # replicas omitted — managed by the HPA (80-hpa.yaml).
+  selector:
+    matchLabels:
+      app: scraper-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: scraper-worker
+        app.kubernetes.io/part-of: scraper-system
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: scraper-worker
+          image: scraper-scraper-worker
+          imagePullPolicy: IfNotPresent
+          command: ["node", "dist/main.js"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: scraper-worker-config
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1536Mi"

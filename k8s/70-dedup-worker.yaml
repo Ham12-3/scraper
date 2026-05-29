@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dedup Worker (Module 4) — scraper-dedup-worker image.
+# Runs `python -m src.main`. Consumes parse-results from Kafka, dedups,
+# and upserts canonical/duplicate rows into Postgres (job_postings).
+# No inbound ports → no Service. Scaled by the HPA in 80-hpa.yaml (2–6).
+# DEDUP_POSTGRES_DSN comes from the Secret.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dedup-worker
+  namespace: scraper
+  labels:
+    app: dedup-worker
+    app.kubernetes.io/part-of: scraper-system
+spec:
+  # replicas omitted — managed by the HPA (80-hpa.yaml).
+  selector:
+    matchLabels:
+      app: dedup-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: dedup-worker
+        app.kubernetes.io/part-of: scraper-system
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: dedup-worker
+          image: scraper-dedup-worker
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "src.main"]
+          envFrom:
+            - configMapRef:
+                name: dedup-worker-config
+          env:
+            - name: DEDUP_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: scraper-secrets
+                  key: DEDUP_POSTGRES_DSN
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

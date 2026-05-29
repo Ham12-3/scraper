@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kafka topic init — one-shot Job (mirrors the kafka-init service).
+# Waits for Kafka to be reachable, then creates the three topics idempotently.
+#   scrape-requests  → 3 partitions
+#   parse-results    → 3 partitions
+#   scrape-dlq       → 1 partition
+# all with replication-factor 1.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  namespace: scraper
+  labels:
+    app: kafka-init
+    app.kubernetes.io/part-of: scraper-system
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: kafka-init
+        app.kubernetes.io/part-of: scraper-system
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: apache/kafka:3.7.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "Waiting for Kafka to be ready..."
+              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+                echo "  kafka not ready yet, retrying in 5s..."
+                sleep 5
+              done
+              echo "Kafka is up. Creating topics..."
+              /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 --if-not-exists --topic scrape-requests
+              /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 --if-not-exists --topic parse-results
+              /opt/kafka/bin/kafka-topics.sh --create --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --if-not-exists --topic scrape-dlq
+              echo "Topics ready."
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
