@@ -194,6 +194,9 @@ services:
       KAFKA_TOPIC_INPUT: scrape-requests
       POSTGRES_DSN: postgresql://scraper:scraper@postgres:5432/scraper
       COMPOSE_PROJECT: scraper
+      # Used by People mode (LLM extraction of names/roles/contacts).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      PEOPLE_LLM_MODEL: claude-haiku-4-5
     ports:
       - "3000:3000"
     volumes:

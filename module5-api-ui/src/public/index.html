@@ -44,6 +44,9 @@
   .logs .filters { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
   .logs .filters button { margin: 0; padding: 3px 9px; font-size: 11px; background: var(--border); color: var(--text); font-weight: 500; }
   .logs .filters button.active { background: var(--accent); color: #0d1117; }
+  .filters button { margin: 0; padding: 4px 11px; font-size: 12px; background: var(--border); color: var(--text); font-weight: 500; border: 0; border-radius: 6px; cursor: pointer; }
+  .filters button.active { background: var(--accent); color: #0d1117; }
+  .filters { display: flex; gap: 6px; flex-wrap: wrap; }
   #logfeed { flex: 1; overflow: auto; padding: 8px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.5; }
   .logline { white-space: pre-wrap; word-break: break-word; }
   .logline .svc { display: inline-block; min-width: 120px; font-weight: 600; }
@@ -66,6 +69,10 @@
   <main>
     <section class="pane">
       <h2>Search by Words</h2>
+      <div class="filters" id="modeToggle" style="margin-bottom:10px;">
+        <button data-mode="jobs" class="active">Jobs / Companies</button>
+        <button data-mode="people">People &amp; Contacts</button>
+      </div>
       <input id="query" type="text" placeholder="e.g. wealth managers in london" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;" />
       <button id="searchBtn">Search &amp; Scrape</button>
       <label style="display:block;margin-top:8px;font-size:12px;color:var(--muted);">
@@ -86,7 +93,7 @@
         <button id="clearBtn" style="float:right;margin:0;padding:4px 10px;font-size:11px;background:var(--border);color:var(--text);font-weight:500;">Clear results</button>
       </h2>
       <table>
-        <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Found via</th><th>Status</th><th>Source</th></tr></thead>
+        <thead id="thead"></thead>
         <tbody id="jobs"></tbody>
       </table>
     </section>
@@ -110,29 +117,52 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
-// ---- search by words ----
+// ---- mode (jobs vs people) ----
+let mode = "jobs";
+const THEADS = {
+  jobs: "<tr><th>Title</th><th>Company</th><th>Location</th><th>Found via</th><th>Status</th><th>Source</th></tr>",
+  people: "<tr><th>Name</th><th>Role</th><th>Company</th><th>Location</th><th>Email</th><th>Phone</th><th>Found via</th><th>Source</th></tr>"
+};
+function setMode(m) {
+  mode = m;
+  [...$("modeToggle").children].forEach(b => b.classList.toggle("active", b.dataset.mode === m));
+  $("thead").innerHTML = THEADS[m];
+  $("query").placeholder = m === "people" ? "e.g. project managers in london" : "e.g. wealth managers in london";
+  $("jobs").innerHTML = "";
+  refreshResults();
+}
+$("modeToggle").addEventListener("click", (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
+
+const clearEndpoint = () => (mode === "people" ? "/api/people" : "/api/jobs");
 async function clearResults() {
-  await fetch("/api/jobs", { method: "DELETE" });
-  refreshJobs();
+  await fetch(clearEndpoint(), { method: "DELETE" });
+  refreshResults();
 }
 $("clearBtn").onclick = clearResults;
 
 async function runSearch() {
   const query = $("query").value.trim();
   if (!query) { $("searchMsg").textContent = "Type some words first."; return; }
-  if ($("clearFirst").checked) { try { await fetch("/api/jobs", { method: "DELETE" }); } catch (e) {} }
+  if ($("clearFirst").checked) { try { await fetch(clearEndpoint(), { method: "DELETE" }); } catch (e) {} }
   $("searchMsg").style.color = "var(--muted)";
-  $("searchMsg").textContent = 'Searching the web for "' + query + '"...';
+  $("searchMsg").textContent = (mode === "people" ? 'Finding people for "' : 'Searching the web for "') + query + '"...';
   try {
-    const r = await fetch("/api/search", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query })
-    });
+    const endpoint = mode === "people" ? "/api/people/search" : "/api/search";
+    const r = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "failed");
-    if (!data.count) { $("searchMsg").style.color = "var(--amber)"; $("searchMsg").textContent = "No results found (search may be rate-limited)."; return; }
-    $("searchMsg").style.color = "var(--green)";
-    $("searchMsg").textContent = "Found & enqueued " + data.count + " page(s). Watch the logs + table.";
+    if (mode === "people") {
+      $("searchMsg").style.color = data.peopleFound ? "var(--green)" : "var(--amber)";
+      $("searchMsg").textContent = data.peopleFound
+        ? ("Extracted " + data.peopleFound + " people from " + (data.pages ? data.pages.length : 0) + " page(s).")
+        : "No people found on the result pages (try a 'team' or 'about' style query).";
+    } else {
+      if (!data.count) { $("searchMsg").style.color = "var(--amber)"; $("searchMsg").textContent = "No results found (search may be rate-limited)."; return; }
+      $("searchMsg").style.color = "var(--green)";
+      $("searchMsg").textContent = "Found & enqueued " + data.count + " page(s). Watch the logs + table.";
+    }
     $("query").value = "";
+    refreshResults();
   } catch (e) {
     $("searchMsg").style.color = "var(--red)";
     $("searchMsg").textContent = "Error: " + e.message;
@@ -162,34 +192,64 @@ $("submit").onclick = async () => {
   }
 };
 
-// ---- jobs + stats polling ----
+// ---- results polling (mode-aware) ----
+function esc(s) { return (s == null ? "" : String(s)).replace(/</g, "&lt;"); }
 function statusBadge(j) {
   return j.is_canonical
     ? '<span class="badge canon">canonical</span>'
     : '<span class="badge dup">dup &rarr; ' + (j.canonical_id || "").slice(0,8) + '</span>';
 }
-async function refreshJobs() {
+function renderJobs(jobs) {
+  $("jobCount").textContent = "(" + jobs.length + ")";
+  $("jobs").innerHTML = jobs.map(j => {
+    const loc = [j.location_city, j.location_country].filter(Boolean).join(", ") || "&mdash;";
+    const src = j.source_url ? '<a href="'+j.source_url+'" target="_blank">link</a>' : "";
+    const via = j.query ? '<span style="color:var(--muted)">'+esc(j.query)+'</span>' : "&mdash;";
+    return "<tr><td>"+esc(j.job_title)+"</td><td>"+esc(j.company_name)+"</td><td>"+loc+"</td><td>"+via+"</td><td>"+statusBadge(j)+"</td><td>"+src+"</td></tr>";
+  }).join("");
+}
+function renderPeople(people) {
+  $("jobCount").textContent = "(" + people.length + ")";
+  $("jobs").innerHTML = people.map(p => {
+    const src = p.source_url ? '<a href="'+p.source_url+'" target="_blank">link</a>' : "";
+    const conf = p.confidence ? ' <span style="font-size:10px;color:var(--muted)">('+esc(p.confidence)+')</span>' : '';
+    const email = p.email
+      ? '<a href="mailto:'+esc(p.email)+'">'+esc(p.email)+'</a>'+conf
+      : '<button class="enrich" data-id="'+p.id+'" style="font-size:11px;padding:2px 8px;margin:0;background:var(--border);color:var(--text);border:0;border-radius:6px;cursor:pointer;">enrich</button>';
+    return "<tr><td>"+esc(p.full_name)+"</td><td>"+esc(p.role)+"</td><td>"+esc(p.company)+"</td><td>"+(esc(p.location)||"&mdash;")+"</td><td>"+email+"</td><td>"+(esc(p.phone)||"&mdash;")+"</td><td><span style='color:var(--muted)'>"+esc(p.query)+"</span></td><td>"+src+"</td></tr>";
+  }).join("");
+}
+async function refreshResults() {
   try {
-    const [jobs, stats] = await Promise.all([
-      fetch("/api/jobs").then(r => r.json()),
-      fetch("/api/stats").then(r => r.json())
-    ]);
+    const stats = await fetch("/api/stats").then(r => r.json());
     $("stTotal").textContent = stats.total ?? 0;
     $("stCanon").textContent = stats.canonical ?? 0;
     $("stDup").textContent = stats.duplicates ?? 0;
-    if (Array.isArray(jobs)) {
-      $("jobCount").textContent = "(" + jobs.length + ")";
-      $("jobs").innerHTML = jobs.map(j => {
-        const loc = [j.location_city, j.location_country].filter(Boolean).join(", ") || "&mdash;";
-        const src = j.source_url ? '<a href="'+j.source_url+'" target="_blank">link</a>' : "";
-        const via = j.query ? '<span style="color:var(--muted)">'+j.query.replace(/</g,"&lt;")+'</span>' : "&mdash;";
-        return "<tr><td>"+(j.job_title||"")+"</td><td>"+(j.company_name||"")+"</td><td>"+loc+"</td><td>"+via+"</td><td>"+statusBadge(j)+"</td><td>"+src+"</td></tr>";
-      }).join("");
+  } catch (e) {}
+  try {
+    if (mode === "people") {
+      const people = await fetch("/api/people").then(r => r.json());
+      if (Array.isArray(people)) renderPeople(people);
+    } else {
+      const jobs = await fetch("/api/jobs").then(r => r.json());
+      if (Array.isArray(jobs)) renderJobs(jobs);
     }
-  } catch (e) { /* table not ready yet */ }
+  } catch (e) {}
 }
-refreshJobs();
-setInterval(refreshJobs, 3000);
+// enrich button (event-delegated)
+$("jobs").addEventListener("click", async (e) => {
+  const btn = e.target.closest && e.target.closest("button.enrich");
+  if (!btn) return;
+  btn.textContent = "enriching...";
+  try {
+    const r = await fetch("/api/people/" + btn.dataset.id + "/enrich", { method: "POST" });
+    const d = await r.json();
+    if (r.ok && d.email) { btn.title = (d.confidence || "") + (d.note ? " — " + d.note : ""); refreshResults(); }
+    else { btn.textContent = d.email ? "no email" : (d.note || d.error || "failed"); btn.title = d.note || ""; }
+  } catch (err) { btn.textContent = "failed"; }
+});
+setMode("jobs");
+setInterval(refreshResults, 3000);
 
 // ---- live logs over websocket ----
 let activeFilter = "all";
