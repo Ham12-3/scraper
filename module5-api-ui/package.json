@@ -1,0 +1,16 @@
+{
+  "name": "@scraper/api-ui",
+  "version": "1.0.0",
+  "description": "REST API gateway + live dashboard for the scraper pipeline",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.2",
+    "express": "^4.19.2",
+    "kafkajs": "^2.2.4",
+    "pg": "^8.11.5",
+    "ws": "^8.17.0"
+  }
+}

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Scraper Control Panel</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --amber: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); display: inline-block; }
+  header .dot.ok { background: var(--green); }
+  .stats { margin-left: auto; display: flex; gap: 22px; font-size: 13px; }
+  .stats b { color: var(--accent); font-size: 18px; display: block; }
+  .stats span { color: var(--muted); }
+  main { flex: 1; display: grid; grid-template-columns: 360px 1fr; grid-template-rows: 1fr 38%;
+         gap: 1px; background: var(--border); min-height: 0; }
+  .pane { background: var(--panel); padding: 16px; overflow: auto; min-height: 0; }
+  .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  textarea { width: 100%; height: 130px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+             border-radius: 6px; padding: 10px; font-family: ui-monospace, monospace; font-size: 12px; resize: vertical; }
+  button { background: var(--accent); color: #0d1117; border: 0; border-radius: 6px; padding: 9px 16px;
+           font-weight: 600; cursor: pointer; margin-top: 10px; }
+  button:hover { filter: brightness(1.1); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.5; }
+  #submitMsg { font-size: 12px; margin-top: 8px; min-height: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; }
+  .badge.canon { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge.dup { background: rgba(210,153,34,.15); color: var(--amber); }
+  td a { color: var(--accent); text-decoration: none; }
+  /* logs panel spans full width along the bottom */
+  .logs { grid-column: 1 / 3; background: #010409; padding: 0; display: flex; flex-direction: column; min-height: 0; }
+  .logs .bar { padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  .logs .bar h2 { margin: 0; }
+  .logs .filters { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+  .logs .filters button { margin: 0; padding: 3px 9px; font-size: 11px; background: var(--border); color: var(--text); font-weight: 500; }
+  .logs .filters button.active { background: var(--accent); color: #0d1117; }
+  #logfeed { flex: 1; overflow: auto; padding: 8px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.5; }
+  .logline { white-space: pre-wrap; word-break: break-word; }
+  .logline .svc { display: inline-block; min-width: 120px; font-weight: 600; }
+  .logline.err .msg { color: var(--red); }
+  .svc-kafka { color: #d2a8ff; } .svc-parser { color: #79c0ff; } .svc-scraper-worker { color: var(--green); }
+  .svc-dedup-worker { color: var(--amber); } .svc-postgres { color: #ff7b72; } .svc-other { color: var(--muted); }
+</style>
+</head>
+<body>
+  <header>
+    <span id="conn" class="dot"></span>
+    <h1>Scraper Control Panel</h1>
+    <div class="stats">
+      <div><b id="stTotal">0</b><span>Total jobs</span></div>
+      <div><b id="stCanon">0</b><span>Canonical</span></div>
+      <div><b id="stDup">0</b><span>Duplicates</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="pane">
+      <h2>Search by Words</h2>
+      <input id="query" type="text" placeholder="e.g. wealth managers in london" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;" />
+      <button id="searchBtn">Search &amp; Scrape</button>
+      <label style="display:block;margin-top:8px;font-size:12px;color:var(--muted);">
+        <input type="checkbox" id="clearFirst" checked /> Clear previous results before searching
+      </label>
+      <div id="searchMsg" style="font-size:12px;margin-top:8px;min-height:16px;"></div>
+      <p class="hint">Type words &mdash; we search the web (DuckDuckGo), take the top results,
+        and scrape each through the pipeline. No URL needed.</p>
+
+      <h2 style="margin-top:22px;">Or Submit URLs Directly</h2>
+      <textarea id="urls" placeholder="One URL per line, e.g.&#10;https://www.python.org/jobs/&#10;https://example.com/careers/123"></textarea>
+      <button id="submit">Scrape</button>
+      <div id="submitMsg"></div>
+    </section>
+
+    <section class="pane">
+      <h2>Scraped Results <span id="jobCount" style="color:var(--muted)"></span>
+        <button id="clearBtn" style="float:right;margin:0;padding:4px 10px;font-size:11px;background:var(--border);color:var(--text);font-weight:500;">Clear results</button>
+      </h2>
+      <table>
+        <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Found via</th><th>Status</th><th>Source</th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+    </section>
+
+    <section class="logs">
+      <div class="bar">
+        <h2>Live Pipeline Logs</h2>
+        <div class="filters" id="filters">
+          <button data-svc="all" class="active">all</button>
+          <button data-svc="kafka">kafka</button>
+          <button data-svc="scraper-worker">scraper-worker</button>
+          <button data-svc="parser">parser</button>
+          <button data-svc="dedup-worker">dedup-worker</button>
+          <button data-svc="postgres">postgres</button>
+        </div>
+      </div>
+      <div id="logfeed"></div>
+    </section>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// ---- search by words ----
+async function clearResults() {
+  await fetch("/api/jobs", { method: "DELETE" });
+  refreshJobs();
+}
+$("clearBtn").onclick = clearResults;
+
+async function runSearch() {
+  const query = $("query").value.trim();
+  if (!query) { $("searchMsg").textContent = "Type some words first."; return; }
+  if ($("clearFirst").checked) { try { await fetch("/api/jobs", { method: "DELETE" }); } catch (e) {} }
+  $("searchMsg").style.color = "var(--muted)";
+  $("searchMsg").textContent = 'Searching the web for "' + query + '"...';
+  try {
+    const r = await fetch("/api/search", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "failed");
+    if (!data.count) { $("searchMsg").style.color = "var(--amber)"; $("searchMsg").textContent = "No results found (search may be rate-limited)."; return; }
+    $("searchMsg").style.color = "var(--green)";
+    $("searchMsg").textContent = "Found & enqueued " + data.count + " page(s). Watch the logs + table.";
+    $("query").value = "";
+  } catch (e) {
+    $("searchMsg").style.color = "var(--red)";
+    $("searchMsg").textContent = "Error: " + e.message;
+  }
+}
+$("searchBtn").onclick = runSearch;
+$("query").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
+
+// ---- submit ----
+$("submit").onclick = async () => {
+  const urls = $("urls").value.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!urls.length) { $("submitMsg").textContent = "Enter at least one URL."; return; }
+  $("submitMsg").style.color = "var(--muted)";
+  $("submitMsg").textContent = "Enqueuing " + urls.length + " URL(s)...";
+  try {
+    const r = await fetch("/api/scrape/bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "failed");
+    $("submitMsg").style.color = "var(--green)";
+    $("submitMsg").textContent = "Enqueued " + data.count + " job(s). Watch the logs + table.";
+    $("urls").value = "";
+  } catch (e) {
+    $("submitMsg").style.color = "var(--red)";
+    $("submitMsg").textContent = "Error: " + e.message;
+  }
+};
+
+// ---- jobs + stats polling ----
+function statusBadge(j) {
+  return j.is_canonical
+    ? '<span class="badge canon">canonical</span>'
+    : '<span class="badge dup">dup &rarr; ' + (j.canonical_id || "").slice(0,8) + '</span>';
+}
+async function refreshJobs() {
+  try {
+    const [jobs, stats] = await Promise.all([
+      fetch("/api/jobs").then(r => r.json()),
+      fetch("/api/stats").then(r => r.json())
+    ]);
+    $("stTotal").textContent = stats.total ?? 0;
+    $("stCanon").textContent = stats.canonical ?? 0;
+    $("stDup").textContent = stats.duplicates ?? 0;
+    if (Array.isArray(jobs)) {
+      $("jobCount").textContent = "(" + jobs.length + ")";
+      $("jobs").innerHTML = jobs.map(j => {
+        const loc = [j.location_city, j.location_country].filter(Boolean).join(", ") || "&mdash;";
+        const src = j.source_url ? '<a href="'+j.source_url+'" target="_blank">link</a>' : "";
+        const via = j.query ? '<span style="color:var(--muted)">'+j.query.replace(/</g,"&lt;")+'</span>' : "&mdash;";
+        return "<tr><td>"+(j.job_title||"")+"</td><td>"+(j.company_name||"")+"</td><td>"+loc+"</td><td>"+via+"</td><td>"+statusBadge(j)+"</td><td>"+src+"</td></tr>";
+      }).join("");
+    }
+  } catch (e) { /* table not ready yet */ }
+}
+refreshJobs();
+setInterval(refreshJobs, 3000);
+
+// ---- live logs over websocket ----
+let activeFilter = "all";
+const feed = $("logfeed");
+$("filters").addEventListener("click", (e) => {
+  if (e.target.tagName !== "BUTTON") return;
+  activeFilter = e.target.dataset.svc;
+  [...$("filters").children].forEach(b => b.classList.toggle("active", b === e.target));
+  [...feed.children].forEach(el => {
+    el.style.display = (activeFilter === "all" || el.dataset.svc === activeFilter) ? "" : "none";
+  });
+});
+function svcClass(s) {
+  return ["kafka","parser","scraper-worker","dedup-worker","postgres"].includes(s) ? "svc-"+s : "svc-other";
+}
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(proto + "://" + location.host + "/ws/logs");
+  ws.onopen = () => $("conn").classList.add("ok");
+  ws.onclose = () => { $("conn").classList.remove("ok"); setTimeout(connect, 2000); };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    const div = document.createElement("div");
+    div.className = "logline" + (m.level === "err" ? " err" : "");
+    div.dataset.svc = m.service;
+    div.innerHTML = '<span class="svc '+svcClass(m.service)+'">'+m.service+'</span> <span class="msg">'+
+                    m.line.replace(/</g,"&lt;")+'</span>';
+    if (activeFilter !== "all" && m.service !== activeFilter) div.style.display = "none";
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    feed.appendChild(div);
+    while (feed.children.length > 1000) feed.removeChild(feed.firstChild);
+    if (atBottom) feed.scrollTop = feed.scrollHeight;
+  };
+}
+connect();
+</script>
+</body>
+</html>

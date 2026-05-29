@@ -101,7 +101,8 @@ services:
       WORKER_CONCURRENCY: "2"
       WORKER_SHUTDOWN_TIMEOUT_MS: "30000"
       PARSER_SERVICE_URL: http://parser:8080
-      SCRAPER_MOCK_MODE: "true"
+      # Toggle real browser scraping from .env (default: mock/canned HTML).
+      SCRAPER_MOCK_MODE: "${SCRAPER_MOCK_MODE:-true}"
       # Module 1 browser config (used when SCRAPER_MOCK_MODE=false)
       CLUSTER_MAX_WORKERS: "2"
       CLUSTER_LAUNCH_TIMEOUT_MS: "30000"
@@ -173,6 +174,31 @@ services:
       DEDUP_FLUSH_INTERVAL_S: "15"
       DEDUP_BATCH_FLUSH_SIZE: "4"
       DEDUP_POSTGRES_DSN: postgresql://scraper:scraper@postgres:5432/scraper
+    restart: unless-stopped
+
+  # ── API Gateway + Dashboard UI ────────────────────────────────────────────
+  api-ui:
+    build:
+      context: module5-api-ui
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      API_PORT: "3000"
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC_INPUT: scrape-requests
+      POSTGRES_DSN: postgresql://scraper:scraper@postgres:5432/scraper
+      COMPOSE_PROJECT: scraper
+    ports:
+      - "3000:3000"
+    volumes:
+      # Read-only Docker socket so the dashboard can stream live container logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
   # ── Sample Producer ───────────────────────────────────────────────────────
