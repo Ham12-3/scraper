@@ -1,0 +1,24 @@
+{
+  "name": "@scraper/kafka-worker",
+  "version": "1.0.0",
+  "description": "Kafka consumer/producer worker that orchestrates the scrape → parse pipeline",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "jest --runInBand --forceExit",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@scraper/browser-controller": "file:../module1-browser-controller",
+    "kafkajs": "^2.2.4",
+    "prom-client": "^15.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.5",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.4",
+    "@types/jest": "^29.5.12"
+  }
+}

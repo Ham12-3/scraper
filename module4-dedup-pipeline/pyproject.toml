@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "dedup-pipeline"
+version = "1.0.0"
+description = "Job-posting deduplication pipeline: preprocess → block → compare → classify"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "recordlinkage>=0.16",
+    "scikit-learn>=1.4",
+    "pydantic>=2.7",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-mock>=3.14",
+    "mypy>=1.10",
+    "types-python-dateutil",
+    "pandas-stubs>=2.2",
+]
+
+consumer = [
+    "kafka-python>=2.0",
+    "psycopg2-binary>=2.9",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
