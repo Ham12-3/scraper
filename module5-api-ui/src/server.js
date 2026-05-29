@@ -92,6 +92,12 @@ async function ensureSchema() {
        )`
     );
     await pool.query("ALTER TABLE people ADD COLUMN IF NOT EXISTS confidence TEXT");
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS companies (
+         id TEXT PRIMARY KEY, name TEXT, description TEXT, website TEXT, location TEXT,
+         sector TEXT, size TEXT, source_url TEXT, query TEXT, created_at TIMESTAMPTZ DEFAULT now()
+       )`
+    );
     console.log(JSON.stringify({ event: "api.schema.ready" }));
   } catch (_e) {
     setTimeout(ensureSchema, 3000); // Postgres may still be booting
@@ -116,15 +122,38 @@ function htmlToText(html) {
     .slice(0, 8000);
 }
 
-async function fetchPageText(url) {
-  const resp = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    },
-    signal: AbortSignal.timeout(15000),
-  });
+const SCRAPER_SCRAPE_URL = process.env.SCRAPER_SCRAPE_URL || "";
+const UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+async function plainFetchText(url) {
+  const resp = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15000) });
   return htmlToText(await resp.text());
+}
+
+// Prefer the Module 1 stealth browser (renders JS, evades basic bot blocks);
+// fall back to a plain fetch if the browser endpoint is unset/unavailable/empty.
+async function fetchPageText(url) {
+  if (SCRAPER_SCRAPE_URL) {
+    try {
+      const resp = await fetch(SCRAPER_SCRAPE_URL.replace(/\/$/, "") + "/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+        signal: AbortSignal.timeout(45000),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const text = htmlToText(data.html || "");
+        if (text) return text;
+      }
+    } catch (_e) { /* fall through to plain fetch */ }
+  }
+  try {
+    return await plainFetchText(url);
+  } catch (_e) {
+    return "";
+  }
 }
 
 async function extractPeople(text, sourceUrl) {
@@ -147,6 +176,67 @@ async function extractPeople(text, sourceUrl) {
     return Array.isArray(arr) ? arr : [];
   } catch (_e) {
     return [];
+  }
+}
+
+async function extractCompanies(text, sourceUrl) {
+  const prompt =
+    "From the web page text below, extract every distinct real company/organisation mentioned. " +
+    'Return ONLY a JSON array; each item: {"name","description","website","location","sector","size"}. ' +
+    "Use null for unknown fields. Keep descriptions under 25 words. If none, return [].\n\n" +
+    "PAGE URL: " + sourceUrl + "\n\nPAGE TEXT:\n" + text;
+  const resp = await anthropic.messages.create({
+    model: PEOPLE_MODEL,
+    max_tokens: 1500,
+    temperature: 0,
+    messages: [{ role: "user", content: prompt }],
+  });
+  const raw = (resp.content && resp.content[0] && resp.content[0].text) || "[]";
+  const match = raw.match(/\[[\s\S]*\]/);
+  try {
+    const arr = JSON.parse(match ? match[0] : raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+// Decide whether a free-text query is about people, companies, or jobs.
+// Fast keyword pass first; LLM fallback only when the keywords are ambiguous.
+const PEOPLE_WORDS = ["manager", "managers", "executive", "executives", "founder", "founders", "ceo", "cto", "cfo", "coo", "director", "directors", "partner", "partners", "head of", "team", "staff", "people", "person", "contact", "contacts", "advisor", "advisors", "employee", "employees", "recruiter", "who works"];
+const COMPANY_WORDS = ["companies", "company", "firms", "firm", "startups", "startup", "vendors", "providers", "agencies", "agency", "manufacturers", "suppliers", "businesses", "organisations", "organizations", "brands"];
+const JOB_WORDS = ["job", "jobs", "vacancy", "vacancies", "hiring", "career", "careers", "role", "roles", "position", "positions", "opening", "openings", "apply"];
+
+function keywordIntent(q) {
+  const s = " " + q.toLowerCase() + " ";
+  const hit = (words) => words.some((w) => s.includes(" " + w + " ") || s.includes(w));
+  if (hit(PEOPLE_WORDS)) return "people";
+  if (hit(JOB_WORDS)) return "jobs";
+  if (hit(COMPANY_WORDS)) return "companies";
+  return null;
+}
+
+async function classifyIntent(query) {
+  const kw = keywordIntent(query);
+  if (kw) return kw;
+  if (!anthropic) return "people"; // sensible default for this tool
+  try {
+    const resp = await anthropic.messages.create({
+      model: PEOPLE_MODEL,
+      max_tokens: 8,
+      temperature: 0,
+      messages: [{
+        role: "user",
+        content:
+          'Classify this search query as exactly one word: "people" (individuals/contacts), ' +
+          '"companies" (organisations/firms), or "jobs" (job openings). Reply with only that word.\n\nQuery: ' +
+          query,
+      }],
+    });
+    const word = ((resp.content[0] && resp.content[0].text) || "").toLowerCase().trim();
+    return ["people", "companies", "jobs"].find((m) => word.includes(m)) || "people";
+  } catch (_e) {
+    return "people";
   }
 }
 
@@ -187,14 +277,14 @@ app.post("/api/scrape/bulk", async (req, res) => {
   }
 });
 
-// Turn a free-text query into result URLs via DuckDuckGo's HTML endpoint
-// (no API key required), then enqueue each one through the pipeline.
-async function webSearchUrls(query, limit) {
+// Turn a free-text query into result URLs (no API key required). DuckDuckGo
+// HTML first, with a retry and a Bing fallback so a single rate-limit doesn't
+// leave the user with zero results.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function ddgUrls(query, limit) {
   const resp = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query), {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    },
+    headers: { "User-Agent": UA },
   });
   const html = await resp.text();
   const urls = [];
@@ -212,53 +302,161 @@ async function webSearchUrls(query, limit) {
   return urls;
 }
 
+async function bingUrls(query, limit) {
+  const resp = await fetch("https://www.bing.com/search?q=" + encodeURIComponent(query), {
+    headers: { "User-Agent": UA },
+  });
+  const html = await resp.text();
+  const urls = [];
+  const re = /<li class="b_algo"[\s\S]*?<h2>\s*<a[^>]*href="(https?:\/\/[^"]+)"/g;
+  let m;
+  while ((m = re.exec(html)) && urls.length < limit) {
+    const real = m[1].replace(/&amp;/g, "&");
+    if (!/bing\.com|microsoft\.com/.test(real) && !urls.includes(real)) urls.push(real);
+  }
+  return urls;
+}
+
+async function webSearchUrls(query, limit) {
+  let urls = await ddgUrls(query, limit).catch(() => []);
+  if (!urls.length) { await sleep(800); urls = await ddgUrls(query, limit).catch(() => []); }
+  if (!urls.length) { urls = await bingUrls(query, limit).catch(() => []); }
+  return urls;
+}
+
+async function runJobsSearch(query, limit) {
+  const urls = await webSearchUrls(query, limit);
+  if (!urls.length) return { query, count: 0, enqueued: [], note: "no results (search may be rate-limited)" };
+  const enqueued = [];
+  for (const url of urls) enqueued.push({ url, taskId: await enqueue(url, query) });
+  return { query, count: enqueued.length, enqueued };
+}
+
 app.post("/api/search", async (req, res) => {
   const { query, limit } = req.body || {};
   if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
   if (!producerReady) return res.status(503).json({ error: "kafka not ready yet" });
   try {
-    const n = Math.min(parseInt(limit, 10) || 5, 10);
-    const urls = await webSearchUrls(query, n);
-    if (!urls.length) return res.json({ query, count: 0, enqueued: [], note: "no results (search may be rate-limited)" });
-    const enqueued = [];
-    for (const url of urls) enqueued.push({ url, taskId: await enqueue(url, query) });
-    res.json({ query, count: enqueued.length, enqueued });
+    res.json(await runJobsSearch(query, Math.min(parseInt(limit, 10) || 5, 10)));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// People mode: search the web for a query, scrape the top pages, and
-// LLM-extract people + any contact details present on each page.
+// People mode: search the web for a query, scrape the top pages (via the
+// stealth browser), and LLM-extract people + any contact details on the page.
+async function runPeopleSearch(query, limit) {
+  const urls = await webSearchUrls(query, limit);
+  let inserted = 0, blocked = 0;
+  const pages = [];
+  for (const url of urls) {
+    try {
+      const text = await fetchPageText(url);
+      if (!text) { blocked++; pages.push({ url, people: 0, note: "empty/blocked" }); continue; }
+      const people = await extractPeople(text, url);
+      for (const p of people) {
+        await pool.query(
+          `INSERT INTO people (id, full_name, role, company, location, email, phone, linkedin, source_url, query)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [crypto.randomUUID(), p.full_name || null, p.role || null, p.company || null, p.location || null,
+           p.email || null, p.phone || null, p.linkedin || null, url, query]
+        );
+        inserted++;
+      }
+      pages.push({ url, people: people.length });
+    } catch (e) {
+      blocked++;
+      pages.push({ url, people: 0, note: "fetch/extract failed" });
+    }
+  }
+  return { query, peopleFound: inserted, pagesTried: urls.length, blocked, pages };
+}
+
 app.post("/api/people/search", async (req, res) => {
   const { query, limit } = req.body || {};
   if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
   if (!anthropic) return res.status(503).json({ error: "ANTHROPIC_API_KEY not set on the api-ui service" });
   try {
-    const n = Math.min(parseInt(limit, 10) || 5, 8);
-    const urls = await webSearchUrls(query, n);
-    let inserted = 0;
-    const pagesTried = [];
-    for (const url of urls) {
-      try {
-        const text = await fetchPageText(url);
-        if (!text) { pagesTried.push({ url, people: 0, note: "empty" }); continue; }
-        const people = await extractPeople(text, url);
-        for (const p of people) {
-          await pool.query(
-            `INSERT INTO people (id, full_name, role, company, location, email, phone, linkedin, source_url, query)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-            [crypto.randomUUID(), p.full_name || null, p.role || null, p.company || null, p.location || null,
-             p.email || null, p.phone || null, p.linkedin || null, url, query]
-          );
-          inserted++;
-        }
-        pagesTried.push({ url, people: people.length });
-      } catch (e) {
-        pagesTried.push({ url, people: 0, note: "fetch/extract failed" });
+    res.json(await runPeopleSearch(query, Math.min(parseInt(limit, 10) || 6, 8)));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Companies mode: same flow, LLM-extracting organisations instead of people.
+async function runCompaniesSearch(query, limit) {
+  const urls = await webSearchUrls(query, limit);
+  let inserted = 0, blocked = 0;
+  const pages = [];
+  for (const url of urls) {
+    try {
+      const text = await fetchPageText(url);
+      if (!text) { blocked++; pages.push({ url, companies: 0, note: "empty/blocked" }); continue; }
+      const companies = await extractCompanies(text, url);
+      for (const c of companies) {
+        await pool.query(
+          `INSERT INTO companies (id, name, description, website, location, sector, size, source_url, query)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [crypto.randomUUID(), c.name || null, c.description || null, c.website || null,
+           c.location || null, c.sector || null, c.size || null, url, query]
+        );
+        inserted++;
       }
+      pages.push({ url, companies: companies.length });
+    } catch (e) {
+      blocked++;
+      pages.push({ url, companies: 0, note: "fetch/extract failed" });
     }
-    res.json({ query, peopleFound: inserted, pages: pagesTried });
+  }
+  return { query, companiesFound: inserted, pagesTried: urls.length, blocked, pages };
+}
+
+app.post("/api/companies/search", async (req, res) => {
+  const { query, limit } = req.body || {};
+  if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
+  if (!anthropic) return res.status(503).json({ error: "ANTHROPIC_API_KEY not set on the api-ui service" });
+  try {
+    res.json(await runCompaniesSearch(query, Math.min(parseInt(limit, 10) || 6, 8)));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/companies", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name, description, website, location, sector, size, source_url, query
+       FROM companies ORDER BY created_at DESC LIMIT 200`
+    );
+    res.json(rows);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
+app.delete("/api/companies", async (_req, res) => {
+  try { await pool.query("TRUNCATE companies"); res.json({ cleared: true }); }
+  catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+// Auto mode: detect intent from the query, then run the matching search.
+app.post("/api/discover", async (req, res) => {
+  const { query } = req.body || {};
+  if (!query || typeof query !== "string") return res.status(400).json({ error: "query is required" });
+  try {
+    const mode = await classifyIntent(query);
+    let result;
+    if (mode === "people") {
+      if (!anthropic) return res.status(503).json({ error: "ANTHROPIC_API_KEY not set" });
+      result = await runPeopleSearch(query, 6);
+    } else if (mode === "companies") {
+      if (!anthropic) return res.status(503).json({ error: "ANTHROPIC_API_KEY not set" });
+      result = await runCompaniesSearch(query, 6);
+    } else {
+      if (!producerReady) return res.status(503).json({ error: "kafka not ready yet" });
+      result = await runJobsSearch(query, 6);
+    }
+    res.json({ mode, ...result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

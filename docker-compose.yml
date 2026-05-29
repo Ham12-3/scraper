@@ -101,6 +101,8 @@ services:
       WORKER_CONCURRENCY: "2"
       WORKER_SHUTDOWN_TIMEOUT_MS: "30000"
       PARSER_SERVICE_URL: http://parser:8080
+      # On-demand /scrape HTTP endpoint (used by api-ui People/Companies modes).
+      SCRAPER_HTTP_PORT: "9091"
       # Toggle real browser scraping from .env (default: mock/canned HTML).
       SCRAPER_MOCK_MODE: "${SCRAPER_MOCK_MODE:-true}"
       # Module 1 browser config (used when SCRAPER_MOCK_MODE=false)
@@ -126,6 +128,7 @@ services:
       MIMICRY_KEYSTROKE_DELAY_MAX: "150"
     ports:
       - "9090:9090"
+      - "9091:9091"
     restart: unless-stopped
 
   # ── PostgreSQL — deduplicated job-posting store ───────────────────────────
@@ -188,6 +191,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      scraper-worker:
+        condition: service_started
     environment:
       API_PORT: "3000"
       KAFKA_BROKERS: kafka:9092
@@ -197,6 +202,8 @@ services:
       # Used by People mode (LLM extraction of names/roles/contacts).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       PEOPLE_LLM_MODEL: claude-haiku-4-5
+      # People/Companies modes fetch pages through the stealth browser here.
+      SCRAPER_SCRAPE_URL: http://scraper-worker:9091
     ports:
       - "3000:3000"
     volumes:

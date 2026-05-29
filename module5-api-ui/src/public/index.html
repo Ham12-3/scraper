@@ -70,8 +70,10 @@
     <section class="pane">
       <h2>Search by Words</h2>
       <div class="filters" id="modeToggle" style="margin-bottom:10px;">
-        <button data-mode="jobs" class="active">Jobs / Companies</button>
-        <button data-mode="people">People &amp; Contacts</button>
+        <button data-mode="auto" class="active">Auto</button>
+        <button data-mode="people">People</button>
+        <button data-mode="companies">Companies</button>
+        <button data-mode="jobs">Jobs</button>
       </div>
       <input id="query" type="text" placeholder="e.g. wealth managers in london" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:13px;" />
       <button id="searchBtn">Search &amp; Scrape</button>
@@ -117,27 +119,35 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
-// ---- mode (jobs vs people) ----
-let mode = "jobs";
+// ---- mode (auto / people / companies / jobs) ----
+let mode = "auto";       // which toggle button is selected
+let viewMode = "jobs";   // which table is currently rendered/polled
 const THEADS = {
   jobs: "<tr><th>Title</th><th>Company</th><th>Location</th><th>Found via</th><th>Status</th><th>Source</th></tr>",
-  people: "<tr><th>Name</th><th>Role</th><th>Company</th><th>Location</th><th>Email</th><th>Phone</th><th>Found via</th><th>Source</th></tr>"
+  people: "<tr><th>Name</th><th>Role</th><th>Company</th><th>Location</th><th>Email</th><th>Phone</th><th>Found via</th><th>Source</th></tr>",
+  companies: "<tr><th>Company</th><th>Sector</th><th>Location</th><th>Website</th><th>Description</th><th>Found via</th></tr>"
 };
+const CLEAR_ENDPOINT = { jobs: "/api/jobs", people: "/api/people", companies: "/api/companies" };
+
+function setView(m) {
+  viewMode = m;
+  $("thead").innerHTML = THEADS[m];
+  refreshResults();
+}
 function setMode(m) {
   mode = m;
   [...$("modeToggle").children].forEach(b => b.classList.toggle("active", b.dataset.mode === m));
-  $("thead").innerHTML = THEADS[m];
-  $("query").placeholder = m === "people" ? "e.g. project managers in london" : "e.g. wealth managers in london";
-  $("jobs").innerHTML = "";
-  refreshResults();
+  $("query").placeholder =
+    m === "people" ? "e.g. hedge fund managers in sweden" :
+    m === "companies" ? "e.g. hedge funds in sweden" :
+    m === "jobs" ? "e.g. data engineer jobs london" :
+    "type anything — we'll auto-detect people, companies, or jobs";
+  if (m !== "auto") setView(m);
 }
 $("modeToggle").addEventListener("click", (e) => { if (e.target.dataset.mode) setMode(e.target.dataset.mode); });
 
-const clearEndpoint = () => (mode === "people" ? "/api/people" : "/api/jobs");
-async function clearResults() {
-  await fetch(clearEndpoint(), { method: "DELETE" });
-  refreshResults();
-}
+const clearEndpoint = () => CLEAR_ENDPOINT[viewMode];
+async function clearResults() { await fetch(clearEndpoint(), { method: "DELETE" }); refreshResults(); }
 $("clearBtn").onclick = clearResults;
 
 async function runSearch() {
@@ -145,21 +155,35 @@ async function runSearch() {
   if (!query) { $("searchMsg").textContent = "Type some words first."; return; }
   if ($("clearFirst").checked) { try { await fetch(clearEndpoint(), { method: "DELETE" }); } catch (e) {} }
   $("searchMsg").style.color = "var(--muted)";
-  $("searchMsg").textContent = (mode === "people" ? 'Finding people for "' : 'Searching the web for "') + query + '"...';
+  $("searchMsg").textContent = 'Searching for "' + query + '"...';
   try {
-    const endpoint = mode === "people" ? "/api/people/search" : "/api/search";
-    const r = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "failed");
-    if (mode === "people") {
-      $("searchMsg").style.color = data.peopleFound ? "var(--green)" : "var(--amber)";
-      $("searchMsg").textContent = data.peopleFound
-        ? ("Extracted " + data.peopleFound + " people from " + (data.pages ? data.pages.length : 0) + " page(s).")
-        : "No people found on the result pages (try a 'team' or 'about' style query).";
+    let data, resultMode;
+    if (mode === "auto") {
+      const r = await fetch("/api/discover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
+      data = await r.json(); if (!r.ok) throw new Error(data.error || "failed");
+      resultMode = data.mode; setView(resultMode);
     } else {
-      if (!data.count) { $("searchMsg").style.color = "var(--amber)"; $("searchMsg").textContent = "No results found (search may be rate-limited)."; return; }
-      $("searchMsg").style.color = "var(--green)";
-      $("searchMsg").textContent = "Found & enqueued " + data.count + " page(s). Watch the logs + table.";
+      resultMode = mode;
+      const ep = mode === "people" ? "/api/people/search" : mode === "companies" ? "/api/companies/search" : "/api/search";
+      const r = await fetch(ep, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
+      data = await r.json(); if (!r.ok) throw new Error(data.error || "failed");
+    }
+    const tag = mode === "auto" ? ("detected: " + resultMode + " — ") : "";
+    if (resultMode === "people") {
+      $("searchMsg").style.color = data.peopleFound ? "var(--green)" : "var(--amber)";
+      $("searchMsg").textContent = tag + (data.peopleFound
+        ? ("found " + data.peopleFound + " people from " + data.pagesTried + " pages (" + data.blocked + " blocked).")
+        : ("no people found — " + (data.pagesTried || 0) + " pages tried, " + (data.blocked || 0) + " blocked."));
+    } else if (resultMode === "companies") {
+      $("searchMsg").style.color = data.companiesFound ? "var(--green)" : "var(--amber)";
+      $("searchMsg").textContent = tag + (data.companiesFound
+        ? ("found " + data.companiesFound + " companies from " + data.pagesTried + " pages (" + data.blocked + " blocked).")
+        : ("no companies found — " + (data.pagesTried || 0) + " pages tried, " + (data.blocked || 0) + " blocked."));
+    } else {
+      $("searchMsg").style.color = data.count ? "var(--green)" : "var(--amber)";
+      $("searchMsg").textContent = tag + (data.count
+        ? ("found & enqueued " + data.count + " page(s). Watch the logs + table.")
+        : "no results (search may be rate-limited).");
     }
     $("query").value = "";
     refreshResults();
@@ -219,6 +243,13 @@ function renderPeople(people) {
     return "<tr><td>"+esc(p.full_name)+"</td><td>"+esc(p.role)+"</td><td>"+esc(p.company)+"</td><td>"+(esc(p.location)||"&mdash;")+"</td><td>"+email+"</td><td>"+(esc(p.phone)||"&mdash;")+"</td><td><span style='color:var(--muted)'>"+esc(p.query)+"</span></td><td>"+src+"</td></tr>";
   }).join("");
 }
+function renderCompanies(rows) {
+  $("jobCount").textContent = "(" + rows.length + ")";
+  $("jobs").innerHTML = rows.map(c => {
+    const site = c.website ? '<a href="'+esc(c.website)+'" target="_blank">site</a>' : "&mdash;";
+    return "<tr><td>"+esc(c.name)+"</td><td>"+(esc(c.sector)||"&mdash;")+"</td><td>"+(esc(c.location)||"&mdash;")+"</td><td>"+site+"</td><td>"+(esc(c.description)||"")+"</td><td><span style='color:var(--muted)'>"+esc(c.query)+"</span></td></tr>";
+  }).join("");
+}
 async function refreshResults() {
   try {
     const stats = await fetch("/api/stats").then(r => r.json());
@@ -227,9 +258,12 @@ async function refreshResults() {
     $("stDup").textContent = stats.duplicates ?? 0;
   } catch (e) {}
   try {
-    if (mode === "people") {
+    if (viewMode === "people") {
       const people = await fetch("/api/people").then(r => r.json());
       if (Array.isArray(people)) renderPeople(people);
+    } else if (viewMode === "companies") {
+      const companies = await fetch("/api/companies").then(r => r.json());
+      if (Array.isArray(companies)) renderCompanies(companies);
     } else {
       const jobs = await fetch("/api/jobs").then(r => r.json());
       if (Array.isArray(jobs)) renderJobs(jobs);
@@ -248,7 +282,8 @@ $("jobs").addEventListener("click", async (e) => {
     else { btn.textContent = d.email ? "no email" : (d.note || d.error || "failed"); btn.title = d.note || ""; }
   } catch (err) { btn.textContent = "failed"; }
 });
-setMode("jobs");
+setView("jobs");
+setMode("auto");
 setInterval(refreshResults, 3000);
 
 // ---- live logs over websocket ----
