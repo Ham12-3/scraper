@@ -10,6 +10,8 @@
  *   6. Register SIGTERM / SIGINT for graceful shutdown
  */
 
+import * as http from "http";
+
 import {
   BrowserCluster,
   loadConfig as loadBrowserConfig,
@@ -128,6 +130,57 @@ async function main(): Promise<void> {
   // Start Prometheus metrics endpoint
   const stopMetrics = startMetricsServer(config.metrics, metrics, logger);
 
+  // On-demand scrape endpoint: lets other services (e.g. the API/UI's People
+  // and Companies modes) fetch a URL through the same stealth browser instead
+  // of a plain HTTP fetch. POST /scrape { url } -> { html, statusCode, resolvedUrl }.
+  const scrapePort = parseInt(process.env["SCRAPER_HTTP_PORT"] ?? "9091", 10);
+  const scrapeServer = http.createServer((req, res) => {
+    if (req.method !== "POST" || (req.url ?? "").split("?")[0] !== "/scrape") {
+      res.writeHead(404).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) req.destroy();
+    });
+    req.on("end", () => {
+      void (async () => {
+        try {
+          const { url } = JSON.parse(body || "{}") as { url?: string };
+          if (!url) {
+            res.writeHead(400, { "Content-Type": "application/json" }).end(
+              JSON.stringify({ error: "url is required" })
+            );
+            return;
+          }
+          const request: ScrapeRequestMessage = {
+            taskId: `http-${Date.now()}`,
+            url,
+            priority: "normal" as ScrapeRequestMessage["priority"],
+            attempt: 1,
+            enqueuedAt: new Date().toISOString(),
+          };
+          const result = await scraper.scrape(request);
+          res.writeHead(200, { "Content-Type": "application/json" }).end(
+            JSON.stringify({
+              html: result.html,
+              statusCode: result.statusCode,
+              resolvedUrl: result.resolvedUrl,
+            })
+          );
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" }).end(
+            JSON.stringify({ error: String(err) })
+          );
+        }
+      })();
+    });
+  });
+  scrapeServer.listen(scrapePort, () => {
+    logger.info("scrape.server_started", undefined, { port: scrapePort });
+  });
+
   // Build and start worker
   const worker = new KafkaWorker(
     config,
@@ -144,6 +197,7 @@ async function main(): Promise<void> {
     logger.info("worker.signal_received", undefined, { signal });
     await worker.stop();
     if (cluster) await cluster.shutdown();
+    scrapeServer.close();
     stopMetrics();
     process.exit(0);
   };
